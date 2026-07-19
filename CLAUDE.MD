@@ -47,6 +47,32 @@ There is no build step or test suite; verification is done by running
   work more broadly but hasn't been explicitly stress-tested against
   whatever OpenTTD version produced the local autosaves.
 
+## Repository setup
+
+This is two GitHub repos wired together via a git submodule — cloning
+without `--recurse-submodules` leaves `rvg_fork/` as an empty directory:
+```
+git clone --recurse-submodules https://github.com/hpendurkar/openttd-telemetry.git
+# or, if already cloned without that flag:
+git submodule update --init
+```
+
+- **`hpendurkar/openttd-telemetry`** (private) — this repo:
+  `openttd_telemetry.py`, `CLAUDE.MD`, `.gitignore`, and the `rvg_fork`
+  submodule reference.
+- **`hpendurkar/RenewedVillageGrowth`** (private) — a real GitHub fork of
+  https://github.com/F1rrel/RenewedVillageGrowth, checked out at
+  `rvg_fork/`. Two branches matter:
+  - `master` — kept as an untouched mirror of upstream (`git remote` there
+    has `origin` = our fork, `upstream` = F1rrel's original), so future RVG
+    releases can be pulled with `git fetch upstream && git merge
+    upstream/master` without fighting our own commits.
+  - `export-data` — the fork's default branch, and what the submodule
+    tracks and what's checked out locally. Has exactly one commit on top of
+    `master`: `export.nut` + the `main.nut` wiring described below. Point
+    OpenTTD's AI/GS folder at `rvg_fork/` (on this branch) to actually run
+    the modified script in-game.
+
 ## Commands
 
 Inspect a savegame's real chunk structure — by default, one sample record
@@ -147,11 +173,12 @@ were the blocker.
 
 ## `rvg_fork/` — locally modified GameScript, the real fix for the above
 
-`rvg_fork/` is a `git clone` of https://github.com/F1rrel/RenewedVillageGrowth
-(the actual GameScript this game runs), with one isolated addition:
-`export.nut`, wired into `main.nut`. It's meant to *replace* whatever copy
-of RVG OpenTTD currently loads for this game, so point OpenTTD's AI/GS
-folder at `rvg_fork/` instead of the BaNaNaS-downloaded version.
+`rvg_fork/` is a submodule checkout of our fork of the actual GameScript
+this game runs (see "Repository setup" above for the fork/branch details),
+with one isolated addition: `export.nut`, wired into `main.nut`. It's meant
+to *replace* whatever copy of RVG OpenTTD currently loads for this game, so
+point OpenTTD's AI/GS folder at `rvg_fork/` instead of the
+BaNaNaS-downloaded version.
 
 The GameScript API resolves exactly the values raw savegame chunks can't:
 `GSTown.GetName()` gives the real resolved display name, `GetPopulation()`
@@ -248,7 +275,10 @@ is the fastest way to check without touching the rest of the pipeline.
   and `report6.log` are historical `--inspect` output captures from
   debugging sessions (not something to regenerate/maintain as part of
   normal work) — useful as evidence of real chunk structure when in doubt,
-  but not part of the running system. Chronologically: `report.log`
+  but not part of the running system. **These are currently untracked and
+  not pushed to the repo** (deliberately, pending a trimmed-down sample
+  report + README) — so on a fresh clone, the line-number citations below
+  won't resolve to an actual file yet. Chronologically: `report.log`
   predates the `CITY`/`CHTS` fix; `report2.log` predates the
   `records`-vs-`headers` fix; `report3.log` onward reflect the current,
   correct script and are trustworthy.
