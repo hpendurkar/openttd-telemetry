@@ -57,9 +57,9 @@ git clone --recurse-submodules https://github.com/hpendurkar/openttd-telemetry.g
 git submodule update --init
 ```
 
-- **`hpendurkar/openttd-telemetry`** (private) — this repo:
-  `openttd_telemetry.py`, `CLAUDE.MD`, `.gitignore`, and the `rvg_fork`
-  submodule reference.
+- **`hpendurkar/openttd-telemetry`** (public — see branch protection note
+  below for why) — this repo: `openttd_telemetry.py`, `CLAUDE.MD`,
+  `.gitignore`, and the `rvg_fork` submodule reference.
 - **`hpendurkar/RenewedVillageGrowth`** (private) — a real GitHub fork of
   https://github.com/F1rrel/RenewedVillageGrowth, checked out at
   `rvg_fork/`. Two branches matter:
@@ -72,6 +72,16 @@ git submodule update --init
     `master`: `export.nut` + the `main.nut` wiring described below. Point
     OpenTTD's AI/GS folder at `rvg_fork/` (on this branch) to actually run
     the modified script in-game.
+
+`openttd-telemetry` is public (required for GitHub's free-tier branch
+protection — private repos need GitHub Pro for this) and `master` is
+protected: direct pushes are rejected (`enforce_admins` is on, so this
+applies to the repo owner too), and changes land via a PR. Do all work on
+a feature branch named `hpendurkar/<short-description>` (e.g.
+`hpendurkar/add-town-size`), then open a PR into `master` — `gh pr create`
+after pushing the branch. `rvg_fork/`'s own repo is unaffected by this and
+stays private/unprotected (solo, low-churn, and separate from this repo's
+history).
 
 ## Commands
 
