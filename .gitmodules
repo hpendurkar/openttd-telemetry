@@ -1,0 +1,4 @@
+[submodule "rvg_fork"]
+	path = rvg_fork
+	url = https://github.com/hpendurkar/RenewedVillageGrowth.git
+	branch = export-data
