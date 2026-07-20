@@ -51,9 +51,11 @@ CHUNK_STATIONS = "STNN"
 CHUNK_VEHICLES = "VEHS"
 CHUNK_GAMESCRIPT = "GSDT"
 
-# Name our modified RVG (rvg_fork/) still reports via GetName() in info.nut —
-# used as a sanity check that GSDT's one record is really our script.
-RVG_SCRIPT_NAME = "Renewed Village Growth"
+# Name our modified RVG (rvg_fork/) reports via GetName() in info.nut — a
+# distinct name/short-name (RVGT) from upstream RVG so OpenTTD never
+# confuses the two, and so this lookup unambiguously finds our script's
+# GSDT record regardless of whether upstream RVG is also installed.
+RVG_SCRIPT_NAME = "RVG Telemetry"
 
 
 class _Cursor:
