@@ -9,11 +9,7 @@ its single GameScript slot.
 
 OpenTTD writes a full `.sav` file on its own monthly autosave schedule.
 This project watches that autosave folder and, each time a new save
-appears, parses it externally in Python and writes out CSVs. Nothing runs
-inside the game itself except a locally modified copy of the
-[Renewed Village Growth](https://github.com/F1rrel/RenewedVillageGrowth)
-(RVG) GameScript this game already runs — used only to *read* real town
-data, not to change how towns grow.
+appears, parses it externally in Python and writes out CSVs.
 
 Two independent data sources feed the extraction, because a savegame's raw
 data chunks turned out to be incapable of answering some of these questions
@@ -22,14 +18,18 @@ on their own:
 - **Direct savegame parsing** (via [OpenTTDLab](https://github.com/michalc/OpenTTDLab)),
   for stations and vehicles — this data is genuinely present in the save
   and reads out cleanly.
-- **A modified RVG fork** ([`rvg_fork/`](rvg_fork/), a submodule), for
-  towns — the raw savegame has no population field at all, and town/station
-  names are blank unless a player manually renamed them (the real display
-  name is normally synthesized by the game client, not stored). RVG's
-  GameScript API access resolves the real values instead
-  (`GSTown.GetPopulation()`, `GetName()`, etc.), snapshots them once a
-  month into its own save data, and this project decodes that snapshot
-  straight out of the savegame's `GSDT` chunk.
+- **RVG Telemetry** ([`rvg_fork/`](rvg_fork/), a submodule) — a fork of the
+  [Renewed Village Growth](https://github.com/F1rrel/RenewedVillageGrowth)
+  (RVG) GameScript, for towns. The raw savegame has no population field at
+  all, and town/station names are blank unless a player manually renamed
+  them (the real display name is normally synthesized by the game client,
+  not stored). RVG's GameScript API access resolves the real values
+  instead (`GSTown.GetPopulation()`, `GetName()`, etc.), snapshots them
+  once a month into its own save data, and this project decodes that
+  snapshot straight out of the savegame's `GSDT` chunk. It runs as its own
+  distinct GameScript ("RVG Telemetry", short name `RVGT`) — same growth
+  logic as upstream RVG, selected separately rather than replacing it, so
+  it can't be confused with or interfere with an existing RVG install.
 
 See [CLAUDE.MD](CLAUDE.MD) for the full technical trail — why the raw
 chunks fall short, how the `GSDT` decoder works, and the repo/submodule
@@ -42,12 +42,23 @@ pip install OpenTTDLab pandas
 ```
 
 In-game:
-1. Point OpenTTD's AI/GameScript folder at `rvg_fork/` (on its
-   `export-data` branch) instead of whatever copy of RVG it currently
-   loads — see [CLAUDE.MD](CLAUDE.MD)'s "Repository setup" section for how
-   `rvg_fork/` is wired up as a submodule.
-2. Set the autosave interval to monthly (Settings → Environment → Autosave,
+1. Make `rvg_fork/` discoverable by OpenTTD: it needs to live under
+   `<OpenTTD user dir>/game/` (loose files — the same place any locally
+   developed GameScript goes, separate from BaNaNaS-managed content). A
+   directory junction works without admin rights, e.g. on Windows:
+   ```
+   cmd /c mklink /J "<OpenTTD user dir>\game\rvg_fork" "<this repo>\rvg_fork"
+   ```
+   Edits to `export.nut`/`main.nut` are then live in-game immediately —
+   no manual copy step.
+2. Start a new game, open **AI/Game Script Settings**, and select
+   **"RVG Telemetry"** from the Game Script dropdown — *not* "Renewed
+   Village Growth" (the unmodified original, if it's also installed) and
+   not any other GameScript folder that might exist under `game/`.
+3. Set the autosave interval to monthly (Settings → Environment → Autosave,
    or the `autosave` value in `openttd.cfg`).
+4. Let at least one in-game month pass, then confirm it's working with
+   `--dump-rvg-export` (see Usage below) before relying on the watch loop.
 
 ## Usage
 
