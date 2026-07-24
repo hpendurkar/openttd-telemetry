@@ -62,10 +62,15 @@ In-game:
 
 ## Usage
 
-Watch an autosave folder and write CSVs for every new save as it appears:
+Watch an autosave folder and write CSVs (plus a full-map screenshot) for
+every new save as it appears:
 ```
-python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data"
+python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data" [--no-screenshots] [--openttd-exe "C:\Program Files\OpenTTD\openttd.exe"]
 ```
+Screenshots work by briefly launching OpenTTD itself against each save
+non-interactively (there's no way to render one from the savegame data
+directly) — expect a real OpenTTD window to flash on screen for a few
+seconds per save. Pass `--no-screenshots` to skip this and only write CSVs.
 
 Inspect a savegame's raw chunk structure directly — useful when adding new
 fields or debugging extraction logic:
@@ -82,12 +87,13 @@ python openttd_telemetry.py --dump-rvg-export "/path/to/some/autosave.sav"
 
 ## Output
 
-Each processed `.sav` file produces three CSVs in `--out-dir`, named after
-the save file's own stem (e.g. `autosave3_towns.csv`), so every autosave
-becomes one labeled snapshot in time. There is no in-place aggregation yet
-— each run adds a new set of per-save files rather than appending to a
-combined table (a `pandas`-based step to stitch these into a single
-time-series dataframe is planned but not built).
+Each processed `.sav` file produces three CSVs plus a map screenshot in
+`--out-dir`, named after the save file's own stem (e.g. `autosave3_towns.csv`,
+`autosave3_map.png`), so every autosave becomes one labeled snapshot in
+time. There is no in-place aggregation yet — each run adds a new set of
+per-save files rather than appending to a combined table (a `pandas`-based
+step to stitch these into a single time-series dataframe is planned but
+not built).
 
 **`<stem>_towns.csv`** — one row per town:
 
@@ -129,8 +135,20 @@ least one in-game monthly tick on that save.
 | `profit_this_year` | |
 | `age` | |
 
+**`<stem>_map.png`** — a full-map ("giant") screenshot, rendered by
+briefly launching OpenTTD itself against that save (skip with
+`--no-screenshots`). These are large — tens of MB for a real map — since
+there's no resizing/compression step yet.
+
 ## Known limitations
 
+- Map screenshots briefly write into OpenTTD's real `scripts/game_start.scr`
+  during capture (deleted immediately after) rather than a sandboxed copy —
+  a sandboxed `-X` run was tried first but silently fails to load any save
+  at all, since it also cuts off this game's NewGRF dependencies. If an
+  interactive OpenTTD session happens to start/load a game at the exact
+  moment a headless screenshot run is mid-flight, that session would also
+  get screenshotted-and-quit — a narrow, few-second window per save.
 - Cargo type in the stations/vehicles CSVs is a raw positional index, not
   a resolved name — this game runs NewGRF industry sets that reassign
   cargo IDs per-game, so a fixed index-to-name mapping isn't safe. The

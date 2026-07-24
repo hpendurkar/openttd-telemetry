@@ -30,7 +30,9 @@ import enum
 import itertools
 import json
 import lzma
+import shutil
 import struct
+import subprocess
 import time
 import zlib
 from pathlib import Path
@@ -56,6 +58,16 @@ CHUNK_GAMESCRIPT = "GSDT"
 # confuses the two, and so this lookup unambiguously finds our script's
 # GSDT record regardless of whether upstream RVG is also installed.
 RVG_SCRIPT_NAME = "RVG Telemetry"
+
+# Default OpenTTD install location (Windows) — overridable via --openttd-exe.
+DEFAULT_OPENTTD_EXE = Path(r"C:\Program Files\OpenTTD\openttd.exe")
+
+# OpenTTD's real personal directory — overridable via --openttd-personal-dir.
+# capture_map_screenshot has to use this (not an isolated copy) because this
+# game depends on custom NewGRFs that only resolve from here; launching with
+# -X to sandbox the run (tried first) silently fails to load any such save
+# at all, since -X also cuts off NewGRF/AI-library resolution.
+DEFAULT_OPENTTD_PERSONAL_DIR = Path.home() / "Documents" / "OpenTTD"
 
 
 class _Cursor:
@@ -486,7 +498,70 @@ def write_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def process_one_save(sav_path: Path, out_dir: Path) -> None:
+def capture_map_screenshot(
+    sav_path: Path,
+    out_dir: Path,
+    openttd_exe: Path = DEFAULT_OPENTTD_EXE,
+    personal_dir: Path = DEFAULT_OPENTTD_PERSONAL_DIR,
+    timeout: int = 120,
+) -> None:
+    """
+    Renders a full-map ("giant") screenshot of a savegame by actually
+    launching OpenTTD non-interactively: `-g <save>` loads it, which
+    triggers OpenTTD's own scripts/game_start.scr hook (confirmed from
+    OnStartGame() in openttd.cpp — fires for loaded saves, not just new
+    games), and that script tells it to screenshot and quit. There's no
+    other way to do this — "giant" screenshots are rendered by the game's
+    own sprite renderer, not decodable from raw savegame data, and a null/
+    headless video driver can't render anything at all (confirmed via
+    OpenTTD upstream discussion #12452), so a real window necessarily
+    flashes on screen briefly for each save.
+
+    Runs against the *real* personal directory rather than an isolated one
+    — an earlier attempt at sandboxing this via `-X` silently failed to
+    load anything, because `-X` also cuts off NewGRF/AI-library resolution,
+    which this game's saves depend on. Since scripts/game_start.scr would
+    therefore also fire for a normal interactive play session, it's written
+    immediately before this subprocess call and deleted immediately after
+    (in a finally block) so it's absent the rest of the time. There's a
+    small residual race: if an interactive session starts/loads a game at
+    the exact moment this is mid-flight, that session would also get
+    screenshotted-and-quit. In practice this window is only the few seconds
+    a headless run takes, once per processed save.
+    """
+    scripts_dir = personal_dir / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    game_start_scr = scripts_dir / "game_start.scr"
+
+    stem = sav_path.stem
+    screenshot_dir = personal_dir / "screenshot"
+    for stale in screenshot_dir.glob(f"{stem}.*"):
+        stale.unlink()
+
+    game_start_scr.write_text(f"screenshot giant {stem}\nquit\n")
+    try:
+        subprocess.run(
+            [str(openttd_exe), "-g", str(sav_path)],
+            timeout=timeout,
+            check=False,
+            capture_output=True,
+        )
+    finally:
+        game_start_scr.unlink(missing_ok=True)
+
+    matches = list(screenshot_dir.glob(f"{stem}.*"))
+    if not matches:
+        print(f"  Warning: no screenshot produced for {sav_path.name}")
+        return
+    shutil.move(str(matches[0]), out_dir / f"{stem}_map{matches[0].suffix}")
+
+
+def process_one_save(
+    sav_path: Path,
+    out_dir: Path,
+    capture_screenshots: bool = True,
+    openttd_exe: Path = DEFAULT_OPENTTD_EXE,
+) -> None:
     print(f"Processing {sav_path.name}...")
     parsed = parse_sav_file(sav_path)
 
@@ -501,8 +576,20 @@ def process_one_save(sav_path: Path, out_dir: Path) -> None:
     write_csv(extract_stations(parsed), out_dir / f"{stamp}_stations.csv")
     write_csv(extract_vehicles(parsed), out_dir / f"{stamp}_vehicles.csv")
 
+    if capture_screenshots:
+        try:
+            capture_map_screenshot(sav_path, out_dir, openttd_exe)
+        except Exception as e:
+            print(f"  Warning: couldn't capture map screenshot for {sav_path.name}: {e}")
 
-def watch_and_process(watch_dir: Path, out_dir: Path, poll_seconds: int = 30) -> None:
+
+def watch_and_process(
+    watch_dir: Path,
+    out_dir: Path,
+    poll_seconds: int = 30,
+    capture_screenshots: bool = True,
+    openttd_exe: Path = DEFAULT_OPENTTD_EXE,
+) -> None:
     """
     Simple polling watcher (no extra dependency beyond OpenTTDLab/pandas).
     Tracks already-processed files by name so re-running doesn't redo work.
@@ -520,7 +607,7 @@ def watch_and_process(watch_dir: Path, out_dir: Path, poll_seconds: int = 30) ->
             new_files = [f for f in sav_files if f.name not in processed]
             for f in new_files:
                 try:
-                    process_one_save(f, out_dir)
+                    process_one_save(f, out_dir, capture_screenshots, openttd_exe)
                     processed.add(f.name)
                     processed_marker.write_text(json.dumps(sorted(processed)))
                 except Exception as e:
@@ -539,6 +626,8 @@ def main():
     parser.add_argument("--chunk", type=str, help="Restrict --inspect to a single chunk ID (e.g. CITY)")
     parser.add_argument("--dump-rvg-export", type=str, help="Path to a .sav file; decode and print rvg_fork's GSDT export table for debugging")
     parser.add_argument("--poll-seconds", type=int, default=30, help="Polling interval in seconds")
+    parser.add_argument("--no-screenshots", action="store_true", help="Skip capturing a map screenshot per save (see capture_map_screenshot)")
+    parser.add_argument("--openttd-exe", type=str, default=str(DEFAULT_OPENTTD_EXE), help="Path to openttd.exe, used for map screenshots")
     args = parser.parse_args()
 
     if args.inspect:
@@ -553,7 +642,13 @@ def main():
     if not args.watch_dir:
         parser.error("--watch-dir is required unless using --inspect")
 
-    watch_and_process(Path(args.watch_dir), Path(args.out_dir), args.poll_seconds)
+    watch_and_process(
+        Path(args.watch_dir),
+        Path(args.out_dir),
+        args.poll_seconds,
+        not args.no_screenshots,
+        Path(args.openttd_exe),
+    )
 
 
 if __name__ == "__main__":
