@@ -44,13 +44,18 @@ pip install OpenTTDLab pandas
 In-game:
 1. Make `rvg_fork/` discoverable by OpenTTD: it needs to live under
    `<OpenTTD user dir>/game/` (loose files — the same place any locally
-   developed GameScript goes, separate from BaNaNaS-managed content). A
-   directory junction works without admin rights, e.g. on Windows:
-   ```
-   cmd /c mklink /J "<OpenTTD user dir>\game\rvg_fork" "<this repo>\rvg_fork"
-   ```
-   Edits to `export.nut`/`main.nut` are then live in-game immediately —
-   no manual copy step.
+   developed GameScript goes, separate from BaNaNaS-managed content).
+   `<OpenTTD user dir>` is `~/Documents/OpenTTD` on both Windows and
+   macOS. Link it in rather than copying, so edits to `export.nut`/
+   `main.nut` are live in-game immediately:
+   - Windows (a directory junction works without admin rights):
+     ```
+     cmd /c mklink /J "<OpenTTD user dir>\game\rvg_fork" "<this repo>\rvg_fork"
+     ```
+   - macOS (a plain symlink — no admin-rights wrinkle here):
+     ```
+     ln -s "<this repo>/rvg_fork" "<OpenTTD user dir>/game/rvg_fork"
+     ```
 2. Start a new game, open **AI/Game Script Settings**, and select
    **"RVG Telemetry"** from the Game Script dropdown — *not* "Renewed
    Village Growth" (the unmodified original, if it's also installed) and
@@ -62,10 +67,28 @@ In-game:
 
 ## Usage
 
+The script itself is OS-agnostic — pure Python/`pathlib`, no Windows-only
+APIs — and `~/Documents/OpenTTD` (the default personal directory it looks
+for `screenshot`/`scripts` under) is correct on macOS as well as Windows
+with no changes needed. The one thing that differs per platform is where
+the OpenTTD executable itself lives, via `--openttd-exe`:
+
+- **Windows**: defaults to `C:\Program Files\OpenTTD\openttd.exe` (no
+  need to pass `--openttd-exe` unless installed elsewhere). A
+  double-click launcher is also available — see `watch_autosaves.bat`
+  below.
+- **macOS**: pass `--openttd-exe`, pointing at the binary inside the app
+  bundle, typically:
+  ```
+  --openttd-exe "/Applications/OpenTTD.app/Contents/MacOS/openttd"
+  ```
+  There's no dedicated launcher script for macOS — the command below is
+  the whole thing.
+
 Watch an autosave folder and write CSVs (plus a full-map screenshot) for
 every new save as it appears:
 ```
-python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data" [--no-screenshots] [--openttd-exe "C:\Program Files\OpenTTD\openttd.exe"]
+python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data" [--no-screenshots] [--openttd-exe "<path-to-openttd-executable>"]
 ```
 Screenshots work by briefly launching OpenTTD itself against each save
 non-interactively (there's no way to render one from the savegame data
