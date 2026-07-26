@@ -165,6 +165,26 @@ a way it wasn't before — reprocessing a save now duplicates its rows
 instead of harmlessly overwriting the same file. `watch_and_process`
 itself is a simple polling loop, no `watchdog` dependency.
 
+**`.processed.json` tracks `{filename: mtime}`, not just filenames** — a
+real bug, not a hypothetical: OpenTTD's autosave folder reuses a *fixed*,
+rotating set of filenames (`autosave0.sav`..`autosave<max_num_autosaves-1>.sav`)
+rather than ever-increasing ones, so a filename-only "have I seen this
+before" check means that once every filename in the rotation has been seen
+once — one full rotation, ~8 hours at a 15-minute autosave interval and
+`max_num_autosaves=32` — the watcher silently stops processing anything
+new *forever*, since every filename it can ever see again already looks
+"done," even though the file's actual content keeps changing underneath
+that name. Confirmed this had already happened in practice: a real
+`.processed.json` had exactly all 32 rotating filenames in it. Comparing
+`(filename, mtime)` instead fixes this — a reused slot's new content has a
+new mtime, so it's correctly treated as new. `watch_and_process` also now
+sorts by mtime rather than filename for the same underlying reason (a
+filename string sort puts `"autosave10"` before `"autosave2"`, not
+matching real write order). Old list-format `.processed.json` files are
+migrated in place on first load — every listed filename is assumed
+processed as of its *current* mtime, so upgrading doesn't itself trigger
+a reprocessing flood.
+
 ## Why two data sources (raw savegame chunks turned out insufficient alone)
 
 Exhaustive investigation (see `report3.log`/`report4.log`/`report6.log` for

@@ -622,25 +622,41 @@ def watch_and_process(
     openttd_exe: Path = DEFAULT_OPENTTD_EXE,
 ) -> None:
     """
-    Simple polling watcher (no extra dependency beyond OpenTTDLab/pandas).
-    Tracks already-processed files by name so re-running doesn't redo work.
+    Simple polling watcher (no extra dependency beyond OpenTTDLab/Pillow).
+    Tracks already-processed files by (name, mtime) so re-running doesn't
+    redo work — mtime matters because OpenTTD's autosave folder reuses a
+    fixed, rotating set of filenames (autosave0.sav..autosaveN.sav) rather
+    than ever-increasing ones; tracking by name alone would mean a reused
+    slot's new content is silently never processed once every filename in
+    the rotation has been seen once. Processing order is by mtime too
+    (not filename, which sorts "autosave10" before "autosave2" as strings)
+    so saves are handled in the order they were actually written.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     processed_marker = out_dir / ".processed.json"
-    processed = set()
+    processed: dict[str, float] = {}
     if processed_marker.exists():
-        processed = set(json.loads(processed_marker.read_text()))
+        raw = json.loads(processed_marker.read_text())
+        if isinstance(raw, list):
+            # Migrate from the old filename-only format: assume each was
+            # processed as of its current mtime, so upgrading doesn't
+            # itself trigger reprocessing - only genuinely new/changed
+            # files will from here on.
+            processed = {name: (watch_dir / name).stat().st_mtime for name in raw if (watch_dir / name).exists()}
+        else:
+            processed = raw
 
     print(f"Watching {watch_dir} every {poll_seconds}s. Ctrl+C to stop.")
     try:
         while True:
-            sav_files = sorted(watch_dir.glob("*.sav"))
-            new_files = [f for f in sav_files if f.name not in processed]
+            sav_files = sorted(watch_dir.glob("*.sav"), key=lambda f: f.stat().st_mtime)
+            new_files = [f for f in sav_files if processed.get(f.name) != f.stat().st_mtime]
             for f in new_files:
                 try:
+                    mtime = f.stat().st_mtime
                     process_one_save(f, out_dir, capture_screenshots, openttd_exe)
-                    processed.add(f.name)
-                    processed_marker.write_text(json.dumps(sorted(processed)))
+                    processed[f.name] = mtime
+                    processed_marker.write_text(json.dumps(processed))
                 except Exception as e:
                     print(f"  Failed to process {f.name}: {e}")
             time.sleep(poll_seconds)

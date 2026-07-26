@@ -128,7 +128,12 @@ each save's rows just land directly in the combined file). Every row
 carries a `save` column identifying which save it came from — this is
 what makes the accumulated data a time series rather than just a snapshot.
 Re-processing the same save twice would duplicate its rows; in normal use
-`watch_and_process`'s `.processed.json` tracking prevents that.
+`watch_and_process`'s `.processed.json` tracking prevents that — it tracks
+each file's modification time as well as its name, since OpenTTD reuses a
+fixed, rotating set of autosave filenames rather than ever-increasing
+ones, and saves are processed in the order they were actually written
+(not alphabetically by filename, which would misorder e.g. `autosave10`
+before `autosave2`).
 
 **`towns.csv`** — one row per town per processed save:
 
