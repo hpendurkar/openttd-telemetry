@@ -100,9 +100,10 @@ python openttd_telemetry.py --dump-rvg-export "<path-to-autosave.sav>"
 ```
 
 Run the watch loop, polling a directory for new autosaves and writing one set
-of CSVs per save:
+of CSVs (plus a map screenshot, by default — see `capture_map_screenshot`
+below) per save:
 ```
-python openttd_telemetry.py --watch-dir "<path-to-autosave-dir>" --out-dir "./extracted_data" [--poll-seconds 30]
+python openttd_telemetry.py --watch-dir "<path-to-autosave-dir>" --out-dir "./extracted_data" [--poll-seconds 30] [--no-screenshots] [--openttd-exe "<path-to-openttd.exe>"]
 ```
 
 ## Architecture
@@ -273,6 +274,36 @@ fields matched `GoalTown::SavingTownData()` exactly, including a real
 `max_population: 4031`. If this ever needs re-verifying, `--dump-rvg-export`
 is the fastest way to check without touching the rest of the pipeline.
 
+## Map screenshots (`capture_map_screenshot`)
+
+`process_one_save` also renders a full-map PNG per save by actually
+launching OpenTTD non-interactively: `-g <save>` loads it, which triggers
+OpenTTD's own `scripts/game_start.scr` hook (confirmed from `OnStartGame()`
+in `openttd.cpp` — fires for *loaded* saves, not just new games), and that
+script runs `screenshot giant <name>` then `quit`. This isn't decodable
+from raw savegame data — "giant" screenshots come from the game's own
+sprite renderer — and a null/headless video driver can't render anything
+at all (confirmed via [OpenTTD upstream discussion #12452](https://github.com/OpenTTD/OpenTTD/discussions/12452),
+raised by OpenTTDLab's own author hitting the same wall), so a real window
+necessarily flashes on screen briefly for each save. `screenshot giant` on
+a real map produces very large images (a small test map alone was
+65473×32887px / ~37MB) — worth knowing before enabling this against a big
+map over many saves.
+
+**Runs against the real personal directory, not an isolated one** — the
+first attempt sandboxed this with `-X` (rooting OpenTTD's search paths at
+a scratch directory) specifically so `game_start.scr` could never fire
+during normal interactive play, but `-X` also cuts off NewGRF/AI-library
+resolution, and this game depends on custom NewGRFs — every save silently
+failed to load under `-X` (confirmed: `OnStartGame()` never fired, no
+screenshot, no error). Since the real personal directory has to be used
+instead, `game_start.scr` is written immediately before each headless
+subprocess call and deleted immediately after (in a `finally` block), so
+it's absent the rest of the time. Residual risk: if an interactive session
+starts/loads a game at the exact moment a headless run is mid-flight, that
+session would also get screenshotted-and-quit — in practice this window is
+only the few seconds one headless run takes, once per processed save.
+
 ## Remaining known gaps
 
 - `STNN.goods` cargo type is still positional only, unmapped to a cargo
@@ -281,6 +312,10 @@ is the fastest way to check without touching the rest of the pipeline.
   could be added to `export.nut` per-station if this becomes needed.
 - No aggregation step yet combines the per-month CSVs into a single
   time-series dataframe (pandas is installed for this purpose but unused).
+- `capture_map_screenshot`'s output PNGs are the raw `screenshot giant`
+  size (tens of MB each for a real map) — no resizing/compression step
+  exists yet. Pillow was used ad hoc to verify one during development but
+  isn't a project dependency.
 - `report.log`, `report2.log`, `report3.log`, `report4.log`, `report5.log`,
   and `report6.log` are historical `--inspect` output captures from
   debugging sessions (not something to regenerate/maintain as part of
