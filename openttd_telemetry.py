@@ -8,7 +8,7 @@ parses it with OpenTTDLab and extracts:
   - Vehicles: name/type, status, current station/order info
 
 Requires:
-    pip install OpenTTDLab pandas watchdog
+    pip install OpenTTDLab Pillow
 
 Setup in-game:
     Set autosave interval to monthly (Settings -> Environment -> Autosave,
@@ -30,7 +30,6 @@ import enum
 import itertools
 import json
 import lzma
-import shutil
 import struct
 import subprocess
 import time
@@ -38,6 +37,11 @@ import zlib
 from pathlib import Path
 
 from openttdlab import parse_savegame
+from PIL import Image
+
+# "giant" screenshots are legitimately huge (tens of millions of pixels for
+# a real map) — that's expected, not a decompression-bomb attack.
+Image.MAX_IMAGE_PIXELS = None
 
 # Confirmed chunk IDs from OpenTTD source (src/saveload/*.cpp handlers):
 #   CITY = Towns (CORRECTED — CHTS is actually the Cheats chunk, not Towns)
@@ -62,12 +66,22 @@ RVG_SCRIPT_NAME = "RVG Telemetry"
 # Default OpenTTD install location (Windows) — overridable via --openttd-exe.
 DEFAULT_OPENTTD_EXE = Path(r"C:\Program Files\OpenTTD\openttd.exe")
 
-# OpenTTD's real personal directory — overridable via --openttd-personal-dir.
-# capture_map_screenshot has to use this (not an isolated copy) because this
-# game depends on custom NewGRFs that only resolve from here; launching with
-# -X to sandbox the run (tried first) silently fails to load any such save
-# at all, since -X also cuts off NewGRF/AI-library resolution.
+# OpenTTD's real personal directory — overridable via capture_map_screenshot's
+# personal_dir param (no CLI flag; hasn't been needed). capture_map_screenshot
+# has to use this (not an isolated copy) because this game depends on custom
+# NewGRFs that only resolve from here; launching with -X to sandbox the run
+# (tried first) silently fails to load any such save at all, since -X also
+# cuts off NewGRF/AI-library resolution.
 DEFAULT_OPENTTD_PERSONAL_DIR = Path.home() / "Documents" / "OpenTTD"
+
+# Giant screenshots are downscaled (preserving aspect ratio) and re-encoded
+# as JPEG before being kept — the raw "giant" output is native per-tile
+# resolution (tens of millions of pixels, tens of MB), vastly more than any
+# video target needs. 3840px longest side / quality 90 chosen after
+# measuring real output: ~1MB/frame with no visible quality loss, verified
+# against a real save.
+SCREENSHOT_MAX_DIMENSION = 3840
+SCREENSHOT_JPEG_QUALITY = 90
 
 
 class _Cursor:
@@ -488,13 +502,25 @@ def extract_vehicles(parsed: dict) -> list[dict]:
     return rows
 
 
-def write_csv(rows: list[dict], path: Path) -> None:
+def append_csv(rows: list[dict], path: Path, stamp: str) -> None:
+    """
+    Appends one save's rows to a persistent, growing CSV (one file total per
+    entity type, rather than a fresh triplet per save) — the `save` column
+    is what makes each row identifiable as time-series data. Writes a
+    header only if the file doesn't exist yet or is empty; assumes a
+    stable schema across calls, which holds since these come from the
+    fixed extract_* functions. Not safe to call twice for the same save
+    (rows would be duplicated) — watch_and_process's .processed.json
+    tracking is what keeps this from happening in normal use.
+    """
     if not rows:
-        print(f"  (no rows to write for {path.name})")
         return
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    rows = [{"save": stamp, **row} for row in rows]
+    is_new = not path.exists() or path.stat().st_size == 0
+    with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
+        if is_new:
+            writer.writeheader()
         writer.writerows(rows)
 
 
@@ -553,7 +579,12 @@ def capture_map_screenshot(
     if not matches:
         print(f"  Warning: no screenshot produced for {sav_path.name}")
         return
-    shutil.move(str(matches[0]), out_dir / f"{stem}_map{matches[0].suffix}")
+
+    raw_path = matches[0]
+    img = Image.open(raw_path)
+    img.thumbnail((SCREENSHOT_MAX_DIMENSION, SCREENSHOT_MAX_DIMENSION))
+    img.convert("RGB").save(out_dir / f"{stem}_map.jpg", quality=SCREENSHOT_JPEG_QUALITY)
+    raw_path.unlink()
 
 
 def process_one_save(
@@ -572,9 +603,9 @@ def process_one_save(
         rvg_export = {}
 
     stamp = sav_path.stem  # use the autosave's own filename as the label
-    write_csv(extract_towns(parsed, rvg_export), out_dir / f"{stamp}_towns.csv")
-    write_csv(extract_stations(parsed), out_dir / f"{stamp}_stations.csv")
-    write_csv(extract_vehicles(parsed), out_dir / f"{stamp}_vehicles.csv")
+    append_csv(extract_towns(parsed, rvg_export), out_dir / "towns.csv", stamp)
+    append_csv(extract_stations(parsed), out_dir / "stations.csv", stamp)
+    append_csv(extract_vehicles(parsed), out_dir / "vehicles.csv", stamp)
 
     if capture_screenshots:
         try:
