@@ -33,11 +33,15 @@ There is no build step or test suite; verification is done by running
 ## Environment
 
 - Windows, Python via the python.org installer — verify with `python --version`.
-- Dependencies: `OpenTTDLab`, `pandas` — verify with `pip show OpenTTDLab pandas`.
-  (`pandas` is a stated dependency but not yet imported/used in the script;
-  the intended use is a later per-month CSV aggregation step, not yet started.)
+- Dependencies: `OpenTTDLab`, `Pillow` — verify with `pip show OpenTTDLab Pillow`.
+  `pandas` is *not* a script dependency despite earlier notes here saying
+  otherwise — the CSV aggregation it was intended for (see `append_csv`)
+  ended up implemented with the stdlib `csv` module instead. It's still
+  the natural tool for a human to actually analyze the resulting
+  `towns.csv`/`stations.csv`/`vehicles.csv`, just not something the script
+  itself imports.
 - No virtualenv or requirements file exists in this repo — install packages
-  as needed with `pip install OpenTTDLab pandas`.
+  as needed with `pip install OpenTTDLab Pillow`.
 - Parsing is done via **OpenTTDLab** (PyPI), built on Patric Stout's OpenTTD
   Savegame Reader. Source of truth for the parser's actual behavior:
   https://github.com/michalc/OpenTTDLab/blob/main/openttdlab.py — check
@@ -145,16 +149,21 @@ profit_this_year/age). The `_first()` helper (`openttd_telemetry.py:89`)
 unwraps these safely.
 
 **Pipeline**: `parse_sav_file` → one `extract_*` function per chunk → rows
-of flat dicts → `write_csv`. `process_one_save` also calls
+of flat dicts → `append_csv`. `process_one_save` also calls
 `extract_rvg_export_table` (wrapped in try/except — a decode failure there
 degrades `extract_towns` to blank population/houses/etc. rather than
 crashing the whole run, since `STNN`/`VEHS` extraction is independently
 solid and shouldn't be taken down by the more fragile GSDT decoder) and
-merges its per-town data into `extract_towns`'s rows. It names all output
-CSVs after the save file's stem. `watch_and_process` is a simple polling
-loop (no `watchdog` dependency despite the module docstring mentioning it)
-that tracks already-processed filenames in `<out-dir>/.processed.json` so
-re-running is idempotent.
+merges its per-town data into `extract_towns`'s rows, then (unless
+`capture_screenshots=False`) calls `capture_map_screenshot` — see "Map
+screenshots" below. `append_csv` writes into three *fixed-name*,
+ever-growing files in `out_dir` (`towns.csv`/`stations.csv`/`vehicles.csv`
+— not one triplet per save as earlier versions did), tagging each row with
+a `save` column so the accumulated file is a real time series; this makes
+`watch_and_process`'s `<out-dir>/.processed.json` tracking load-bearing in
+a way it wasn't before — reprocessing a save now duplicates its rows
+instead of harmlessly overwriting the same file. `watch_and_process`
+itself is a simple polling loop, no `watchdog` dependency.
 
 ## Why two data sources (raw savegame chunks turned out insufficient alone)
 
@@ -286,9 +295,15 @@ sprite renderer — and a null/headless video driver can't render anything
 at all (confirmed via [OpenTTD upstream discussion #12452](https://github.com/OpenTTD/OpenTTD/discussions/12452),
 raised by OpenTTDLab's own author hitting the same wall), so a real window
 necessarily flashes on screen briefly for each save. `screenshot giant` on
-a real map produces very large images (a small test map alone was
-65473×32887px / ~37MB) — worth knowing before enabling this against a big
-map over many saves.
+a real map produces very large raw images — a small test map alone was
+65473×32887px/~37MB, and a real in-progress map measured 16321×8311px/
+~75MB — so the raw file is never kept: `capture_map_screenshot` loads it
+with Pillow immediately after capture, downscales to fit within
+`SCREENSHOT_MAX_DIMENSION` (3840px longest side, aspect ratio preserved)
+and re-encodes as JPEG (`SCREENSHOT_JPEG_QUALITY` = 90), deleting the raw
+file. Measured against the real 75MB example above: ~1MB output, no
+visible quality loss on inspection (towns/farms/roads/water all stayed
+legible).
 
 **Runs against the real personal directory, not an isolated one** — the
 first attempt sandboxed this with `-X` (rooting OpenTTD's search paths at
@@ -310,12 +325,6 @@ only the few seconds one headless run takes, once per processed save.
   name, for the station extractor (not addressed by the RVG export, which
   is town-scoped) — the same `GSCargo.HasCargoClass`-style resolution
   could be added to `export.nut` per-station if this becomes needed.
-- No aggregation step yet combines the per-month CSVs into a single
-  time-series dataframe (pandas is installed for this purpose but unused).
-- `capture_map_screenshot`'s output PNGs are the raw `screenshot giant`
-  size (tens of MB each for a real map) — no resizing/compression step
-  exists yet. Pillow was used ad hoc to verify one during development but
-  isn't a project dependency.
 - `report.log`, `report2.log`, `report3.log`, `report4.log`, `report5.log`,
   and `report6.log` are historical `--inspect` output captures from
   debugging sessions (not something to regenerate/maintain as part of

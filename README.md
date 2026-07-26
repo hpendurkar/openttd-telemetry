@@ -38,8 +38,12 @@ layout.
 ## Setup
 
 ```
-pip install OpenTTDLab pandas
+pip install OpenTTDLab Pillow
 ```
+(`pandas` isn't a dependency of the script itself — the CSV aggregation
+below is done with the stdlib `csv` module — but it's the natural tool for
+actually analyzing the resulting `towns.csv`/`stations.csv`/`vehicles.csv`
+once you have them.)
 
 In-game:
 1. Make `rvg_fork/` discoverable by OpenTTD: it needs to live under
@@ -114,18 +118,23 @@ python openttd_telemetry.py --dump-rvg-export "/path/to/some/autosave.sav"
 
 ## Output
 
-Each processed `.sav` file produces three CSVs plus a map screenshot in
-`--out-dir`, named after the save file's own stem (e.g. `autosave3_towns.csv`,
-`autosave3_map.png`), so every autosave becomes one labeled snapshot in
-time. There is no in-place aggregation yet — each run adds a new set of
-per-save files rather than appending to a combined table (a `pandas`-based
-step to stitch these into a single time-series dataframe is planned but
-not built).
+Each processed `.sav` file appends to three persistent, growing CSVs in
+`--out-dir` — `towns.csv`, `stations.csv`, `vehicles.csv` — plus writes one
+per-save map screenshot named after the save's own stem (e.g.
+`autosave3_map.jpg`). The three CSVs are shared across every save ever
+processed into that `--out-dir` (this *is* the time-series aggregation —
+there's no separate later step to stitch per-save files together, since
+each save's rows just land directly in the combined file). Every row
+carries a `save` column identifying which save it came from — this is
+what makes the accumulated data a time series rather than just a snapshot.
+Re-processing the same save twice would duplicate its rows; in normal use
+`watch_and_process`'s `.processed.json` tracking prevents that.
 
-**`<stem>_towns.csv`** — one row per town:
+**`towns.csv`** — one row per town per processed save:
 
 | column | source | notes |
 | --- | --- | --- |
+| `save` | save file stem | identifies which save this row came from |
 | `town_id` | savegame | |
 | `name` | RVG export (falls back to savegame) | savegame's own name is blank unless manually renamed |
 | `population` | RVG export only | not present in the raw savegame at all |
@@ -136,10 +145,11 @@ not built).
 RVG-sourced columns are blank until the modified script has completed at
 least one in-game monthly tick on that save.
 
-**`<stem>_stations.csv`** — one row per (non-waypoint) station:
+**`stations.csv`** — one row per (non-waypoint) station per processed save:
 
 | column | notes |
 | --- | --- |
+| `save` | identifies which save this row came from |
 | `station_id` | |
 | `name` | blank unless manually renamed, same caveat as town names |
 | `town_id` | owning town |
@@ -148,11 +158,12 @@ least one in-game monthly tick on that save.
 | `num_cargo_types_with_goods_data` | count only |
 | `goods_raw` | raw per-cargo-type rating/waiting data as JSON; cargo type here is positional, not yet mapped to a cargo name |
 
-**`<stem>_vehicles.csv`** — one row per train/road vehicle/ship/aircraft
-(depot-only "effect"/disaster entries are skipped):
+**`vehicles.csv`** — one row per train/road vehicle/ship/aircraft per
+processed save (depot-only "effect"/disaster entries are skipped):
 
 | column | notes |
 | --- | --- |
+| `save` | identifies which save this row came from |
 | `vehicle_id` | |
 | `type` | `train` / `roadveh` / `ship` / `aircraft` |
 | `name` | blank unless manually named |
@@ -162,10 +173,15 @@ least one in-game monthly tick on that save.
 | `profit_this_year` | |
 | `age` | |
 
-**`<stem>_map.png`** — a full-map ("giant") screenshot, rendered by
-briefly launching OpenTTD itself against that save (skip with
-`--no-screenshots`). These are large — tens of MB for a real map — since
-there's no resizing/compression step yet.
+**`<stem>_map.jpg`** — a full-map screenshot, rendered by briefly
+launching OpenTTD itself against that save (skip with `--no-screenshots`).
+Captured at native "giant" resolution then downscaled to fit within
+`SCREENSHOT_MAX_DIMENSION` (3840px longest side) and re-encoded as JPEG
+(`SCREENSHOT_JPEG_QUALITY` = 90) — chosen after measuring a real save's
+output: ~1MB/frame with no visible quality loss, versus ~75MB for the
+untouched original. These stay one file per save (not consolidated like
+the CSVs), since that's what a time-lapse video needs — one frame in, one
+frame out.
 
 ## Known limitations
 
@@ -181,5 +197,3 @@ there's no resizing/compression step yet.
   cargo IDs per-game, so a fixed index-to-name mapping isn't safe. The
   same `GSCargo`-based resolution RVG uses for passengers/mail could be
   extended to stations if this becomes needed.
-- No aggregation step yet combines the per-save CSVs into one time-series
-  dataframe.
