@@ -72,6 +72,10 @@ non-interactively (there's no way to render one from the savegame data
 directly) — expect a real OpenTTD window to flash on screen for a few
 seconds per save. Pass `--no-screenshots` to skip this and only write CSVs.
 
+[`watch_autosaves.bat`](watch_autosaves.bat) wraps the above for the
+standard OpenTTD autosave location — double-click it (or run it from a
+terminal) to start watching with sensible defaults, no arguments needed.
+
 Inspect a savegame's raw chunk structure directly — useful when adding new
 fields or debugging extraction logic:
 ```
