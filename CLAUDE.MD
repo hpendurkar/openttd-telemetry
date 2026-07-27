@@ -35,11 +35,12 @@ There is no build step or test suite; verification is done by running
 - Windows, Python via the python.org installer — verify with `python --version`.
 - Dependencies: `OpenTTDLab`, `Pillow` — verify with `pip show OpenTTDLab Pillow`.
   `pandas` is *not* a script dependency despite earlier notes here saying
-  otherwise — the CSV aggregation it was intended for (see `append_csv`)
-  ended up implemented with the stdlib `csv` module instead. It's still
-  the natural tool for a human to actually analyze the resulting
-  `towns.csv`/`stations.csv`/`vehicles.csv`, just not something the script
-  itself imports.
+  otherwise — the CSV aggregation it was intended for (see
+  `append_csv_section`) ended up implemented with the stdlib `csv` module
+  instead. `pandas` also can't load the resulting CSVs directly anyway
+  (see "Architecture" below) — it's still the natural tool for a human to
+  actually analyze the data, just not without first splitting each file
+  on its section markers.
 - No virtualenv or requirements file exists in this repo — install packages
   as needed with `pip install OpenTTDLab Pillow`.
 - Parsing is done via **OpenTTDLab** (PyPI), built on Patric Stout's OpenTTD
@@ -149,41 +150,68 @@ profit_this_year/age). The `_first()` helper (`openttd_telemetry.py:89`)
 unwraps these safely.
 
 **Pipeline**: `parse_sav_file` → one `extract_*` function per chunk → rows
-of flat dicts → `append_csv`. `process_one_save` also calls
+of flat dicts → `append_csv_section`. `process_one_save` also calls
 `extract_rvg_export_table` (wrapped in try/except — a decode failure there
 degrades `extract_towns` to blank population/houses/etc. rather than
 crashing the whole run, since `STNN`/`VEHS` extraction is independently
 solid and shouldn't be taken down by the more fragile GSDT decoder) and
 merges its per-town data into `extract_towns`'s rows, then (unless
 `capture_screenshots=False`) calls `capture_map_screenshot` — see "Map
-screenshots" below. `append_csv` writes into three *fixed-name*,
-ever-growing files in `out_dir` (`towns.csv`/`stations.csv`/`vehicles.csv`
-— not one triplet per save as earlier versions did), tagging each row with
-a `save` column so the accumulated file is a real time series; this makes
-`watch_and_process`'s `<out-dir>/.processed.json` tracking load-bearing in
-a way it wasn't before — reprocessing a save now duplicates its rows
-instead of harmlessly overwriting the same file. `watch_and_process`
-itself is a simple polling loop, no `watchdog` dependency.
+screenshots" below. Both use `_save_timestamps(sav_path)` — one pair of
+(human-readable, filesystem-safe) timestamp strings derived from the
+save's own mtime, computed once in `process_one_save` and threaded through,
+rather than each callee deriving its own (avoids any chance of the two
+disagreeing if computed separately).
 
-**`.processed.json` tracks `{filename: mtime}`, not just filenames** — a
-real bug, not a hypothetical: OpenTTD's autosave folder reuses a *fixed*,
-rotating set of filenames (`autosave0.sav`..`autosave<max_num_autosaves-1>.sav`)
-rather than ever-increasing ones, so a filename-only "have I seen this
-before" check means that once every filename in the rotation has been seen
-once — one full rotation, ~8 hours at a 15-minute autosave interval and
+**`append_csv_section` writes *sectioned*, not flat, CSVs** — three
+fixed-name, ever-growing files in `out_dir` (`towns.csv`/`stations.csv`/
+`vehicles.csv` — not one triplet per save as earlier versions did), but
+each save's batch of rows is its own section: a `=== <timestamp> ===`
+marker line, then a column-header line, then the data rows. This was a
+deliberate choice over a flat table with a timestamp column, specifically
+for text-scannability — the tradeoff is that the file is no longer a
+single table `pandas.read_csv()`/Excel can load directly, since every
+section repeats its own header line; splitting on the marker lines is
+needed first. This makes `watch_and_process`'s `<out-dir>/.processed.json`
+tracking load-bearing in a way it wasn't before — reprocessing a save now
+duplicates its whole section instead of harmlessly overwriting a file.
+`watch_and_process` itself is a simple polling loop, no `watchdog`
+dependency.
+
+**Screenshots are named `map_<timestamp>.jpg`, not `<stem>_map.jpg`** —
+same underlying reason as the `.processed.json` fix below: naming by the
+save's filename stem would silently overwrite an earlier save's screenshot
+once OpenTTD reuses that filename. Confirmed this would otherwise have
+capped the screenshot collection at `max_num_autosaves` files forever,
+directly undermining the intended use case (accumulating hundreds of
+frames for a time-lapse video) — this was caught and fixed before it had
+a chance to actually lose any frames in practice.
+
+**`.processed.json` tracks `{filename: {mtime, timestamp}}`, not just
+filenames** — a real bug, not a hypothetical: OpenTTD's autosave folder
+reuses a *fixed*, rotating set of filenames
+(`autosave0.sav`..`autosave<max_num_autosaves-1>.sav`) rather than
+ever-increasing ones, so a filename-only "have I seen this before" check
+means that once every filename in the rotation has been seen once — one
+full rotation, ~8 hours at a 15-minute autosave interval and
 `max_num_autosaves=32` — the watcher silently stops processing anything
 new *forever*, since every filename it can ever see again already looks
 "done," even though the file's actual content keeps changing underneath
 that name. Confirmed this had already happened in practice: a real
 `.processed.json` had exactly all 32 rotating filenames in it. Comparing
 `(filename, mtime)` instead fixes this — a reused slot's new content has a
-new mtime, so it's correctly treated as new. `watch_and_process` also now
-sorts by mtime rather than filename for the same underlying reason (a
-filename string sort puts `"autosave10"` before `"autosave2"`, not
-matching real write order). Old list-format `.processed.json` files are
-migrated in place on first load — every listed filename is assumed
-processed as of its *current* mtime, so upgrading doesn't itself trigger
-a reprocessing flood.
+new mtime, so it's correctly treated as new; `mtime` is what's actually
+compared (a precise float, no reparsing), `timestamp` is purely for a
+human looking at the file directly. `watch_and_process` also now sorts by
+mtime rather than filename for the same underlying reason (a filename
+string sort puts `"autosave10"` before `"autosave2"`, not matching real
+write order). Two older on-disk formats are migrated in place immediately
+on load (not just in memory, so an old-format file doesn't stay
+old-format forever if nothing new happens to show up that run) — a bare
+filename list (oldest), and `{filename: mtime}` with no timestamp field
+(the format from one PR in between). Both migrations assume each listed
+file was processed as of its *current* mtime, so upgrading doesn't itself
+trigger a reprocessing flood.
 
 ## Why two data sources (raw savegame chunks turned out insufficient alone)
 

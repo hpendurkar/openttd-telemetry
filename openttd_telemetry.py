@@ -34,6 +34,7 @@ import struct
 import subprocess
 import time
 import zlib
+from datetime import datetime
 from pathlib import Path
 
 from openttdlab import parse_savegame
@@ -82,6 +83,18 @@ DEFAULT_OPENTTD_PERSONAL_DIR = Path.home() / "Documents" / "OpenTTD"
 # against a real save.
 SCREENSHOT_MAX_DIMENSION = 3840
 SCREENSHOT_JPEG_QUALITY = 90
+
+# Every save's outputs are timestamped from its own file's mtime (when
+# OpenTTD actually wrote it), not "now" (when we happen to process it) —
+# two different formats since ":" isn't valid in Windows filenames.
+DISPLAY_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+FILENAME_TIMESTAMP_FORMAT = "%Y-%m-%dT%H-%M-%S"
+
+
+def _save_timestamps(sav_path: Path) -> tuple[str, str]:
+    """Returns (display_timestamp, filename_timestamp) for one save's mtime."""
+    dt = datetime.fromtimestamp(sav_path.stat().st_mtime)
+    return dt.strftime(DISPLAY_TIMESTAMP_FORMAT), dt.strftime(FILENAME_TIMESTAMP_FORMAT)
 
 
 class _Cursor:
@@ -502,31 +515,34 @@ def extract_vehicles(parsed: dict) -> list[dict]:
     return rows
 
 
-def append_csv(rows: list[dict], path: Path, stamp: str) -> None:
+def append_csv_section(rows: list[dict], path: Path, display_timestamp: str) -> None:
     """
     Appends one save's rows to a persistent, growing CSV (one file total per
-    entity type, rather than a fresh triplet per save) — the `save` column
-    is what makes each row identifiable as time-series data. Writes a
-    header only if the file doesn't exist yet or is empty; assumes a
-    stable schema across calls, which holds since these come from the
-    fixed extract_* functions. Not safe to call twice for the same save
-    (rows would be duplicated) — watch_and_process's .processed.json
-    tracking is what keeps this from happening in normal use.
+    entity type, rather than a fresh triplet per save) as a distinct,
+    human-scannable section: a "=== <timestamp> ===" marker line, a column
+    header line, then the data rows, then a blank line. This is NOT a
+    single flat table — every section repeats its own header line, so
+    pandas.read_csv()/Excel can't load the whole file directly; splitting
+    on the marker lines is needed first. Chosen over a flat table +
+    timestamp column specifically for text-scannability. Not safe to call
+    twice for the same save (rows would be duplicated) —
+    watch_and_process's .processed.json tracking is what keeps this from
+    happening in normal use.
     """
     if not rows:
         return
-    rows = [{"save": stamp, **row} for row in rows]
-    is_new = not path.exists() or path.stat().st_size == 0
     with open(path, "a", newline="", encoding="utf-8") as f:
+        f.write(f"=== {display_timestamp} ===\n")
         writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        if is_new:
-            writer.writeheader()
+        writer.writeheader()
         writer.writerows(rows)
+        f.write("\n")
 
 
 def capture_map_screenshot(
     sav_path: Path,
     out_dir: Path,
+    filename_timestamp: str,
     openttd_exe: Path = DEFAULT_OPENTTD_EXE,
     personal_dir: Path = DEFAULT_OPENTTD_PERSONAL_DIR,
     timeout: int = 120,
@@ -554,6 +570,11 @@ def capture_map_screenshot(
     the exact moment this is mid-flight, that session would also get
     screenshotted-and-quit. In practice this window is only the few seconds
     a headless run takes, once per processed save.
+
+    Saved as `map_<filename_timestamp>.jpg` — timestamped rather than named
+    after the save's filename stem, since OpenTTD reuses a fixed, rotating
+    set of autosave filenames; naming by stem would silently overwrite an
+    earlier save's screenshot once that filename recurs.
     """
     scripts_dir = personal_dir / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -583,7 +604,7 @@ def capture_map_screenshot(
     raw_path = matches[0]
     img = Image.open(raw_path)
     img.thumbnail((SCREENSHOT_MAX_DIMENSION, SCREENSHOT_MAX_DIMENSION))
-    img.convert("RGB").save(out_dir / f"{stem}_map.jpg", quality=SCREENSHOT_JPEG_QUALITY)
+    img.convert("RGB").save(out_dir / f"map_{filename_timestamp}.jpg", quality=SCREENSHOT_JPEG_QUALITY)
     raw_path.unlink()
 
 
@@ -602,14 +623,14 @@ def process_one_save(
         print(f"  Warning: couldn't decode RVG export data ({e}); towns will be missing population/houses/cargo.")
         rvg_export = {}
 
-    stamp = sav_path.stem  # use the autosave's own filename as the label
-    append_csv(extract_towns(parsed, rvg_export), out_dir / "towns.csv", stamp)
-    append_csv(extract_stations(parsed), out_dir / "stations.csv", stamp)
-    append_csv(extract_vehicles(parsed), out_dir / "vehicles.csv", stamp)
+    display_timestamp, filename_timestamp = _save_timestamps(sav_path)
+    append_csv_section(extract_towns(parsed, rvg_export), out_dir / "towns.csv", display_timestamp)
+    append_csv_section(extract_stations(parsed), out_dir / "stations.csv", display_timestamp)
+    append_csv_section(extract_vehicles(parsed), out_dir / "vehicles.csv", display_timestamp)
 
     if capture_screenshots:
         try:
-            capture_map_screenshot(sav_path, out_dir, openttd_exe)
+            capture_map_screenshot(sav_path, out_dir, filename_timestamp, openttd_exe)
         except Exception as e:
             print(f"  Warning: couldn't capture map screenshot for {sav_path.name}: {e}")
 
@@ -631,32 +652,49 @@ def watch_and_process(
     the rotation has been seen once. Processing order is by mtime too
     (not filename, which sorts "autosave10" before "autosave2" as strings)
     so saves are handled in the order they were actually written.
+
+    .processed.json stores {filename: {"mtime": <float>, "timestamp":
+    <human-readable>}} — mtime is what's actually compared (precise float,
+    no reparsing), timestamp is there purely so the file is legible to a
+    human looking at it directly.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     processed_marker = out_dir / ".processed.json"
-    processed: dict[str, float] = {}
+    processed: dict[str, dict] = {}
     if processed_marker.exists():
         raw = json.loads(processed_marker.read_text())
         if isinstance(raw, list):
-            # Migrate from the old filename-only format: assume each was
-            # processed as of its current mtime, so upgrading doesn't
-            # itself trigger reprocessing - only genuinely new/changed
-            # files will from here on.
-            processed = {name: (watch_dir / name).stat().st_mtime for name in raw if (watch_dir / name).exists()}
+            # Oldest format: bare filename list. Assume each was processed
+            # as of its current mtime, so upgrading doesn't itself trigger
+            # reprocessing - only genuinely new/changed files will.
+            for name in raw:
+                p = watch_dir / name
+                if p.exists():
+                    mtime = p.stat().st_mtime
+                    processed[name] = {"mtime": mtime, "timestamp": datetime.fromtimestamp(mtime).strftime(DISPLAY_TIMESTAMP_FORMAT)}
         else:
-            processed = raw
+            for name, value in raw.items():
+                # Intermediate format: bare mtime float, no timestamp field.
+                if isinstance(value, dict):
+                    processed[name] = value
+                else:
+                    processed[name] = {"mtime": value, "timestamp": datetime.fromtimestamp(value).strftime(DISPLAY_TIMESTAMP_FORMAT)}
+        # Persist the (possibly-migrated) format immediately, rather than
+        # waiting for the next new file — otherwise an old-format file on
+        # disk would stay old-format indefinitely if nothing new shows up.
+        processed_marker.write_text(json.dumps(processed, indent=2))
 
     print(f"Watching {watch_dir} every {poll_seconds}s. Ctrl+C to stop.")
     try:
         while True:
             sav_files = sorted(watch_dir.glob("*.sav"), key=lambda f: f.stat().st_mtime)
-            new_files = [f for f in sav_files if processed.get(f.name) != f.stat().st_mtime]
+            new_files = [f for f in sav_files if processed.get(f.name, {}).get("mtime") != f.stat().st_mtime]
             for f in new_files:
                 try:
                     mtime = f.stat().st_mtime
                     process_one_save(f, out_dir, capture_screenshots, openttd_exe)
-                    processed[f.name] = mtime
-                    processed_marker.write_text(json.dumps(processed))
+                    processed[f.name] = {"mtime": mtime, "timestamp": datetime.fromtimestamp(mtime).strftime(DISPLAY_TIMESTAMP_FORMAT)}
+                    processed_marker.write_text(json.dumps(processed, indent=2))
                 except Exception as e:
                     print(f"  Failed to process {f.name}: {e}")
             time.sleep(poll_seconds)
