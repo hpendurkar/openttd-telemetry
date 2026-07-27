@@ -118,28 +118,38 @@ python openttd_telemetry.py --dump-rvg-export "/path/to/some/autosave.sav"
 
 ## Output
 
-Each processed `.sav` file appends to three persistent, growing CSVs in
-`--out-dir` — `towns.csv`, `stations.csv`, `vehicles.csv` — plus writes one
-per-save map screenshot named after the save's own stem (e.g.
-`autosave3_map.jpg`). The three CSVs are shared across every save ever
-processed into that `--out-dir` (this *is* the time-series aggregation —
-there's no separate later step to stitch per-save files together, since
-each save's rows just land directly in the combined file). Every row
-carries a `save` column identifying which save it came from — this is
-what makes the accumulated data a time series rather than just a snapshot.
-Re-processing the same save twice would duplicate its rows; in normal use
-`watch_and_process`'s `.processed.json` tracking prevents that — it tracks
-each file's modification time as well as its name, since OpenTTD reuses a
-fixed, rotating set of autosave filenames rather than ever-increasing
-ones, and saves are processed in the order they were actually written
-(not alphabetically by filename, which would misorder e.g. `autosave10`
-before `autosave2`).
+Each processed `.sav` file appends a labeled section to three persistent,
+growing CSVs in `--out-dir` — `towns.csv`, `stations.csv`, `vehicles.csv`
+— plus writes one timestamped map screenshot. Every save is timestamped
+from its *own file's modification time* (when OpenTTD actually wrote it),
+not "now" (when it happens to get processed).
 
-**`towns.csv`** — one row per town per processed save:
+**`towns.csv` / `stations.csv` / `vehicles.csv`** — each is a sequence of
+sections, one per processed save, not a single flat table:
+```
+=== 2026-07-26 09:19:36 ===
+town_id,name,population,houses,passengers_produced,mail_produced
+0,Slardham,2450,78,391,148
+1,Ruwood,285,26,54,21
+...
+
+=== 2026-07-26 09:34:40 ===
+town_id,name,population,houses,passengers_produced,mail_produced
+0,Slardham,2450,78,391,148
+...
+```
+This is deliberate — you can scroll through the raw file and see exactly
+where each save's data starts. The tradeoff: since every section repeats
+its own header line, `pandas.read_csv()`/Excel can't load the whole file
+as one table without first splitting on the `=== ... ===` marker lines.
+Re-processing the same save twice would duplicate its section; in normal
+use `watch_and_process`'s `.processed.json` tracking prevents that — see
+below.
+
+**`towns.csv`** columns — one row per town:
 
 | column | source | notes |
 | --- | --- | --- |
-| `save` | save file stem | identifies which save this row came from |
 | `town_id` | savegame | |
 | `name` | RVG export (falls back to savegame) | savegame's own name is blank unless manually renamed |
 | `population` | RVG export only | not present in the raw savegame at all |
@@ -150,11 +160,10 @@ before `autosave2`).
 RVG-sourced columns are blank until the modified script has completed at
 least one in-game monthly tick on that save.
 
-**`stations.csv`** — one row per (non-waypoint) station per processed save:
+**`stations.csv`** columns — one row per (non-waypoint) station:
 
 | column | notes |
 | --- | --- |
-| `save` | identifies which save this row came from |
 | `station_id` | |
 | `name` | blank unless manually renamed, same caveat as town names |
 | `town_id` | owning town |
@@ -163,12 +172,11 @@ least one in-game monthly tick on that save.
 | `num_cargo_types_with_goods_data` | count only |
 | `goods_raw` | raw per-cargo-type rating/waiting data as JSON; cargo type here is positional, not yet mapped to a cargo name |
 
-**`vehicles.csv`** — one row per train/road vehicle/ship/aircraft per
-processed save (depot-only "effect"/disaster entries are skipped):
+**`vehicles.csv`** columns — one row per train/road vehicle/ship/aircraft
+(depot-only "effect"/disaster entries are skipped):
 
 | column | notes |
 | --- | --- |
-| `save` | identifies which save this row came from |
 | `vehicle_id` | |
 | `type` | `train` / `roadveh` / `ship` / `aircraft` |
 | `name` | blank unless manually named |
@@ -178,15 +186,31 @@ processed save (depot-only "effect"/disaster entries are skipped):
 | `profit_this_year` | |
 | `age` | |
 
-**`<stem>_map.jpg`** — a full-map screenshot, rendered by briefly
-launching OpenTTD itself against that save (skip with `--no-screenshots`).
-Captured at native "giant" resolution then downscaled to fit within
-`SCREENSHOT_MAX_DIMENSION` (3840px longest side) and re-encoded as JPEG
-(`SCREENSHOT_JPEG_QUALITY` = 90) — chosen after measuring a real save's
-output: ~1MB/frame with no visible quality loss, versus ~75MB for the
-untouched original. These stay one file per save (not consolidated like
-the CSVs), since that's what a time-lapse video needs — one frame in, one
-frame out.
+**`map_<timestamp>.jpg`** (e.g. `map_2026-07-26T09-19-36.jpg`) — a
+full-map screenshot, rendered by briefly launching OpenTTD itself against
+that save (skip with `--no-screenshots`). Captured at native "giant"
+resolution then downscaled to fit within `SCREENSHOT_MAX_DIMENSION`
+(3840px longest side) and re-encoded as JPEG (`SCREENSHOT_JPEG_QUALITY` =
+90) — chosen after measuring a real save's output: ~1MB/frame with no
+visible quality loss, versus ~75MB for the untouched original. Named by
+timestamp rather than the save's filename stem — OpenTTD reuses a fixed,
+rotating set of autosave filenames, so naming by stem would silently
+overwrite an earlier save's screenshot once that filename recurs.
+
+**`.processed.json`** — internal bookkeeping so re-running doesn't
+reprocess (and re-duplicate) the same save. One entry per autosave
+filename, storing both the raw modification time actually used for
+comparison and a human-readable timestamp for anyone looking at the file
+directly:
+```json
+{
+  "autosave0.sav": {"mtime": 1785074640.578, "timestamp": "2026-07-26 07:04:00"},
+  "autosave1.sav": {"mtime": 1785075544.269, "timestamp": "2026-07-26 07:19:04"}
+}
+```
+Tracking includes mtime (not just filename) specifically because OpenTTD
+reuses filenames — see "Known limitations" for what that means for
+resetting collection.
 
 ## Known limitations
 
@@ -202,3 +226,11 @@ frame out.
   cargo IDs per-game, so a fixed index-to-name mapping isn't safe. The
   same `GSCargo`-based resolution RVG uses for passengers/mail could be
   extended to stations if this becomes needed.
+- **Resetting data collection**: delete the entire `--out-dir` (or the
+  whole `extracted_data/` folder — it's recreated automatically), not
+  just the CSVs/screenshots you don't want anymore. If you leave
+  `.processed.json` in place, the watcher still thinks every current
+  autosave has already been handled (same filename *and* same
+  modification time it already recorded), so freshly-emptied CSVs won't
+  get repopulated for those saves — only for genuinely new ones going
+  forward.
