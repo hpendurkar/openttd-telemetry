@@ -67,7 +67,7 @@ In-game:
 3. Set the autosave interval to monthly (Settings → Environment → Autosave,
    or the `autosave` value in `openttd.cfg`).
 4. Let at least one in-game month pass, then confirm it's working with
-   `--dump-rvg-export` (see Usage below) before relying on the watch loop.
+   `--dump-rvg-export` (see Usage below) before relying on it day to day.
 
 ## Usage
 
@@ -89,19 +89,26 @@ the OpenTTD executable itself lives, via `--openttd-exe`:
   There's no dedicated launcher script for macOS — the command below is
   the whole thing.
 
-Watch an autosave folder and write CSVs (plus a full-map screenshot) for
-every new save as it appears:
+Process every currently-new autosave (CSVs plus a full-map screenshot
+each) and exit — run it again whenever you want to catch up, rather than
+leaving it running:
 ```
-python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data" [--no-screenshots] [--openttd-exe "<path-to-openttd-executable>"]
+python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data" --once [--no-screenshots] [--openttd-exe "<path-to-openttd-executable>"]
+```
+Or drop `--once` to poll continuously instead, processing each new save as
+it appears, until Ctrl+C — useful if you'd rather leave it running than
+re-launch it periodically:
+```
+python openttd_telemetry.py --watch-dir "/path/to/autosave" --out-dir "./extracted_data" [--poll-seconds 30] [--no-screenshots] [--openttd-exe "<path-to-openttd-executable>"]
 ```
 Screenshots work by briefly launching OpenTTD itself against each save
 non-interactively (there's no way to render one from the savegame data
 directly) — expect a real OpenTTD window to flash on screen for a few
 seconds per save. Pass `--no-screenshots` to skip this and only write CSVs.
 
-[`watch_autosaves.bat`](watch_autosaves.bat) wraps the above for the
-standard OpenTTD autosave location — double-click it (or run it from a
-terminal) to start watching with sensible defaults, no arguments needed.
+[`watch_autosaves.bat`](watch_autosaves.bat) wraps the `--once` form for
+the standard OpenTTD autosave location — double-click it (or run it from
+a terminal) to process everything new and exit, no arguments needed.
 
 Inspect a savegame's raw chunk structure directly — useful when adding new
 fields or debugging extraction logic:
@@ -143,8 +150,8 @@ where each save's data starts. The tradeoff: since every section repeats
 its own header line, `pandas.read_csv()`/Excel can't load the whole file
 as one table without first splitting on the `=== ... ===` marker lines.
 Re-processing the same save twice would duplicate its section; in normal
-use `watch_and_process`'s `.processed.json` tracking prevents that — see
-below.
+use, `.processed.json` tracking (shared by both `--once` and continuous
+mode) prevents that — see below.
 
 **`towns.csv`** columns — one row per town:
 

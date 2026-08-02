@@ -104,9 +104,15 @@ isolation:
 python openttd_telemetry.py --dump-rvg-export "<path-to-autosave.sav>"
 ```
 
-Run the watch loop, polling a directory for new autosaves and writing one set
-of CSVs (plus a map screenshot, by default — see `capture_map_screenshot`
-below) per save:
+Process every currently-new autosave and exit (the default `watch_autosaves.bat`
+behavior — run it again whenever you want to catch up):
+```
+python openttd_telemetry.py --watch-dir "<path-to-autosave-dir>" --out-dir "./extracted_data" --once [--no-screenshots] [--openttd-exe "<path-to-openttd.exe>"]
+```
+
+Or poll continuously instead, writing one set of CSVs (plus a map
+screenshot, by default — see `capture_map_screenshot` below) per save as
+it appears, until Ctrl+C:
 ```
 python openttd_telemetry.py --watch-dir "<path-to-autosave-dir>" --out-dir "./extracted_data" [--poll-seconds 30] [--no-screenshots] [--openttd-exe "<path-to-openttd.exe>"]
 ```
@@ -172,11 +178,17 @@ deliberate choice over a flat table with a timestamp column, specifically
 for text-scannability — the tradeoff is that the file is no longer a
 single table `pandas.read_csv()`/Excel can load directly, since every
 section repeats its own header line; splitting on the marker lines is
-needed first. This makes `watch_and_process`'s `<out-dir>/.processed.json`
-tracking load-bearing in a way it wasn't before — reprocessing a save now
+needed first. This makes the `<out-dir>/.processed.json` tracking
+load-bearing in a way it wasn't before — reprocessing a save now
 duplicates its whole section instead of harmlessly overwriting a file.
-`watch_and_process` itself is a simple polling loop, no `watchdog`
-dependency.
+
+**Two entry points share one "process what's new" core**: `_load_processed`
+(load + migrate `.processed.json`) and `_process_new_autosaves` (one pass:
+find and process everything not yet reflected in it) are used by both
+`process_new_autosaves_once` (`--once` — single pass, then returns; the
+default in `watch_autosaves.bat`) and `watch_and_process` (repeats the
+same pass forever with `time.sleep(poll_seconds)` in between, until
+Ctrl+C, no `watchdog` dependency). Neither duplicates the other's logic.
 
 **Screenshots are named `map_<timestamp>.jpg`, not `<stem>_map.jpg`** —
 same underlying reason as the `.processed.json` fix below: naming by the
@@ -202,7 +214,7 @@ that name. Confirmed this had already happened in practice: a real
 `(filename, mtime)` instead fixes this — a reused slot's new content has a
 new mtime, so it's correctly treated as new; `mtime` is what's actually
 compared (a precise float, no reparsing), `timestamp` is purely for a
-human looking at the file directly. `watch_and_process` also now sorts by
+human looking at the file directly. `_process_new_autosaves` also sorts by
 mtime rather than filename for the same underlying reason (a filename
 string sort puts `"autosave10"` before `"autosave2"`, not matching real
 write order). Two older on-disk formats are migrated in place immediately
