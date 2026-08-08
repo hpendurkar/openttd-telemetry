@@ -635,6 +635,79 @@ def process_one_save(
             print(f"  Warning: couldn't capture map screenshot for {sav_path.name}: {e}")
 
 
+def _load_processed(processed_marker: Path, watch_dir: Path) -> dict:
+    """
+    Loads and migrates .processed.json. Stores {filename: {"mtime": <float>,
+    "timestamp": <human-readable>}} — mtime is what's actually compared
+    (precise float, no reparsing), timestamp is there purely so the file is
+    legible to a human looking at it directly. Two older on-disk formats
+    (a bare filename list, and {filename: mtime} with no timestamp field)
+    are migrated in place immediately (not just in memory, so an old-format
+    file doesn't stay old-format forever if nothing new shows up), assuming
+    each listed file was processed as of its *current* mtime, so upgrading
+    doesn't itself trigger a reprocessing flood.
+    """
+    processed: dict[str, dict] = {}
+    if not processed_marker.exists():
+        return processed
+
+    raw = json.loads(processed_marker.read_text())
+    if isinstance(raw, list):
+        for name in raw:
+            p = watch_dir / name
+            if p.exists():
+                mtime = p.stat().st_mtime
+                processed[name] = {"mtime": mtime, "timestamp": datetime.fromtimestamp(mtime).strftime(DISPLAY_TIMESTAMP_FORMAT)}
+    else:
+        for name, value in raw.items():
+            if isinstance(value, dict):
+                processed[name] = value
+            else:
+                processed[name] = {"mtime": value, "timestamp": datetime.fromtimestamp(value).strftime(DISPLAY_TIMESTAMP_FORMAT)}
+    processed_marker.write_text(json.dumps(processed, indent=2))
+    return processed
+
+
+def _process_new_autosaves(
+    watch_dir: Path,
+    out_dir: Path,
+    processed: dict,
+    processed_marker: Path,
+    capture_screenshots: bool,
+    openttd_exe: Path,
+) -> dict:
+    """
+    One pass: processes every autosave in watch_dir not already reflected
+    in `processed` (by (name, mtime) — see _load_processed), in the order
+    they were actually written (mtime, not filename string sort, which
+    would put "autosave10" before "autosave2"). Returns the updated dict.
+    """
+    sav_files = sorted(watch_dir.glob("*.sav"), key=lambda f: f.stat().st_mtime)
+    new_files = [f for f in sav_files if processed.get(f.name, {}).get("mtime") != f.stat().st_mtime]
+    for f in new_files:
+        try:
+            mtime = f.stat().st_mtime
+            process_one_save(f, out_dir, capture_screenshots, openttd_exe)
+            processed[f.name] = {"mtime": mtime, "timestamp": datetime.fromtimestamp(mtime).strftime(DISPLAY_TIMESTAMP_FORMAT)}
+            processed_marker.write_text(json.dumps(processed, indent=2))
+        except Exception as e:
+            print(f"  Failed to process {f.name}: {e}")
+    return processed
+
+
+def process_new_autosaves_once(
+    watch_dir: Path,
+    out_dir: Path,
+    capture_screenshots: bool = True,
+    openttd_exe: Path = DEFAULT_OPENTTD_EXE,
+) -> None:
+    """Single pass over watch_dir, then returns — see --once."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    processed_marker = out_dir / ".processed.json"
+    processed = _load_processed(processed_marker, watch_dir)
+    _process_new_autosaves(watch_dir, out_dir, processed, processed_marker, capture_screenshots, openttd_exe)
+
+
 def watch_and_process(
     watch_dir: Path,
     out_dir: Path,
@@ -643,60 +716,23 @@ def watch_and_process(
     openttd_exe: Path = DEFAULT_OPENTTD_EXE,
 ) -> None:
     """
-    Simple polling watcher (no extra dependency beyond OpenTTDLab/Pillow).
-    Tracks already-processed files by (name, mtime) so re-running doesn't
-    redo work — mtime matters because OpenTTD's autosave folder reuses a
-    fixed, rotating set of filenames (autosave0.sav..autosaveN.sav) rather
-    than ever-increasing ones; tracking by name alone would mean a reused
-    slot's new content is silently never processed once every filename in
-    the rotation has been seen once. Processing order is by mtime too
-    (not filename, which sorts "autosave10" before "autosave2" as strings)
-    so saves are handled in the order they were actually written.
-
-    .processed.json stores {filename: {"mtime": <float>, "timestamp":
-    <human-readable>}} — mtime is what's actually compared (precise float,
-    no reparsing), timestamp is there purely so the file is legible to a
-    human looking at it directly.
+    Simple polling watcher (no extra dependency beyond OpenTTDLab/Pillow)
+    that repeats _process_new_autosaves forever, until Ctrl+C. Tracks
+    already-processed files by (name, mtime) so re-running doesn't redo
+    work — mtime matters because OpenTTD's autosave folder reuses a fixed,
+    rotating set of filenames (autosave0.sav..autosaveN.sav) rather than
+    ever-increasing ones; tracking by name alone would mean a reused slot's
+    new content is silently never processed once every filename in the
+    rotation has been seen once.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     processed_marker = out_dir / ".processed.json"
-    processed: dict[str, dict] = {}
-    if processed_marker.exists():
-        raw = json.loads(processed_marker.read_text())
-        if isinstance(raw, list):
-            # Oldest format: bare filename list. Assume each was processed
-            # as of its current mtime, so upgrading doesn't itself trigger
-            # reprocessing - only genuinely new/changed files will.
-            for name in raw:
-                p = watch_dir / name
-                if p.exists():
-                    mtime = p.stat().st_mtime
-                    processed[name] = {"mtime": mtime, "timestamp": datetime.fromtimestamp(mtime).strftime(DISPLAY_TIMESTAMP_FORMAT)}
-        else:
-            for name, value in raw.items():
-                # Intermediate format: bare mtime float, no timestamp field.
-                if isinstance(value, dict):
-                    processed[name] = value
-                else:
-                    processed[name] = {"mtime": value, "timestamp": datetime.fromtimestamp(value).strftime(DISPLAY_TIMESTAMP_FORMAT)}
-        # Persist the (possibly-migrated) format immediately, rather than
-        # waiting for the next new file — otherwise an old-format file on
-        # disk would stay old-format indefinitely if nothing new shows up.
-        processed_marker.write_text(json.dumps(processed, indent=2))
+    processed = _load_processed(processed_marker, watch_dir)
 
     print(f"Watching {watch_dir} every {poll_seconds}s. Ctrl+C to stop.")
     try:
         while True:
-            sav_files = sorted(watch_dir.glob("*.sav"), key=lambda f: f.stat().st_mtime)
-            new_files = [f for f in sav_files if processed.get(f.name, {}).get("mtime") != f.stat().st_mtime]
-            for f in new_files:
-                try:
-                    mtime = f.stat().st_mtime
-                    process_one_save(f, out_dir, capture_screenshots, openttd_exe)
-                    processed[f.name] = {"mtime": mtime, "timestamp": datetime.fromtimestamp(mtime).strftime(DISPLAY_TIMESTAMP_FORMAT)}
-                    processed_marker.write_text(json.dumps(processed, indent=2))
-                except Exception as e:
-                    print(f"  Failed to process {f.name}: {e}")
+            processed = _process_new_autosaves(watch_dir, out_dir, processed, processed_marker, capture_screenshots, openttd_exe)
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
         print("Stopped.")
@@ -710,7 +746,8 @@ def main():
     parser.add_argument("--sample-count", type=int, default=1, help="Number of sample records to print per chunk with --inspect")
     parser.add_argument("--chunk", type=str, help="Restrict --inspect to a single chunk ID (e.g. CITY)")
     parser.add_argument("--dump-rvg-export", type=str, help="Path to a .sav file; decode and print rvg_fork's GSDT export table for debugging")
-    parser.add_argument("--poll-seconds", type=int, default=30, help="Polling interval in seconds")
+    parser.add_argument("--poll-seconds", type=int, default=30, help="Polling interval in seconds (ignored with --once)")
+    parser.add_argument("--once", action="store_true", help="Process all currently-new autosaves and exit, instead of polling forever")
     parser.add_argument("--no-screenshots", action="store_true", help="Skip capturing a map screenshot per save (see capture_map_screenshot)")
     parser.add_argument("--openttd-exe", type=str, default=str(DEFAULT_OPENTTD_EXE), help="Path to openttd.exe, used for map screenshots")
     args = parser.parse_args()
@@ -726,6 +763,15 @@ def main():
 
     if not args.watch_dir:
         parser.error("--watch-dir is required unless using --inspect")
+
+    if args.once:
+        process_new_autosaves_once(
+            Path(args.watch_dir),
+            Path(args.out_dir),
+            not args.no_screenshots,
+            Path(args.openttd_exe),
+        )
+        return
 
     watch_and_process(
         Path(args.watch_dir),
